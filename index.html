@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Pictionary Online</title>
+<style>
+  body { font-family: system-ui, Arial, sans-serif; margin:0; display:flex; height:100vh; }
+  #left { flex: 1 1 auto; display:flex; flex-direction:column; }
+  #topbar { padding:10px; display:flex; gap:8px; align-items:center; border-bottom:1px solid #ddd; flex-wrap:wrap; }
+  #canvasWrap { flex:1 1 auto; display:flex; align-items:center; justify-content:center; background:#f7f7f7; }
+  #c { background:#fff; border:1px solid #ddd; touch-action:none; max-width:100%; height:auto; }
+  #right { width:360px; border-left:1px solid #ddd; display:flex; flex-direction:column; }
+  #chat { flex:1 1 auto; overflow:auto; padding:10px; background:#fff; }
+  #entry { display:flex; gap:6px; padding:10px; border-top:1px solid #eee; }
+  #entry input { flex:1 1 auto; padding:8px; }
+  #role { font-weight:600; }
+  .sys { color:#666; }
+  .me { color:#0a0; }
+  .err { color:#a00; }
+  #sideTabs { display:flex; border-bottom:1px solid #eee; }
+  #sideTabs button { flex:1; padding:8px; border:0; background:#f7f7f7; cursor:pointer; }
+  #sideTabs button.active { background:#fff; font-weight:600; border-bottom:2px solid #000; }
+  .panel { display:none; height:100%; }
+  .panel.active { display:block; }
+  #playersList div { padding:6px 10px; border-bottom:1px solid #f1f1f1; }
+  .badge { font-size:12px; padding:1px 6px; border-radius:10px; background:#eee; margin-left:6px; }
+  .badge.drawer { background:#ffe8a3; }
+  .badge.admin { background:#a3d9ff; }
+  #wordOptions { display:flex; gap:8px; margin-left: auto; }
+  #wordOptions button { padding:4px 8px; }
+</style>
+</head>
+<body>
+  <div id="left">
+    <div id="topbar">
+      <label>Room:</label>
+      <input id="room" placeholder="e.g. GAME01" size="10" />
+      <label>Name:</label>
+      <input id="name" placeholder="Your name" size="12" />
+      <button id="joinBtn">Join</button>
+      <span id="role"></span>
+      <div id="wordOptions"></div>
+      <span id="drawerWord" style="margin-left:auto;color:#a00;"></span>
+      <button id="clearBtn" disabled>Clear</button>
+    </div>
+    <div id="canvasWrap">
+      <canvas id="c" width="900" height="600"></canvas>
+    </div>
+  </div>
+
+  <div id="right">
+    <div id="sideTabs">
+      <button id="tabChat" class="active">Chat</button>
+      <button id="tabPlayers">Players</button>
+      <button id="tabAdmin">Admin</button>
+    </div>
+
+    <div id="panelChat" class="panel active">
+      <div id="chat"></div>
+      <div id="entry">
+        <input id="msg" placeholder="Type a guess or chat…" />
+        <button id="sendBtn">Send</button>
+      </div>
+    </div>
+
+    <div id="panelPlayers" class="panel">
+      <div id="playersList"></div>
+    </div>
+
+    <div id="panelAdmin" class="panel">
+      <div style="padding:10px; display:flex; flex-direction:column; gap:10px;">
+        <div><b>Room Settings</b></div>
+        <div>Mode:
+          <button id="modeRandom">Random</button>
+          <button id="modeChoice">Choice</button>
+        </div>
+        <div>Lock Room:
+          <button id="lockRoom">Lock</button>
+          <button id="unlockRoom">Unlock</button>
+        </div>
+        <div>Kick player:
+          <input id="kickName" placeholder="Exact name" />
+          <button id="kickBtn">Kick</button>
+        </div>
+        <div style="font-size:12px;color:#666;">(Admin = first person to join the room.)</div>
+      </div>
+    </div>
+  </div>
+
+<script>
+// Hard-wired WebSocket URL:
+const WS_URL = "wss://pictionary-1-b76g.onrender.com/ws";
+
+let ws = null;
+let isDrawer = false;
+let isAdmin = false;
+let drawing = false;
+let last = null;
+let currentMode = "random";
+
+const chat = document.getElementById('chat');
+const roleSpan = document.getElementById('role');
+const drawerWord = document.getElementById('drawerWord');
+const clearBtn = document.getElementById('clearBtn');
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+ctx.lineWidth = 4;
+ctx.lineJoin = 'round';
+ctx.lineCap = 'round';
+ctx.strokeStyle = '#111';
+
+function log(text, cls='') {
+  const p = document.createElement('div');
+  if (cls) p.className = cls;
+  p.textContent = text;
+  chat.appendChild(p);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function send(obj) {
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify(obj));
+  }
+}
+
+function connect() {
+  const server = WS_URL;
+  const room = (document.getElementById('room').value.trim() || '').toUpperCase();
+  const name = document.getElementById('name').value.trim() || 'Player';
+  if (!server) return log('Server URL not configured.', 'err');
+
+  ws = new WebSocket(server);
+  ws.onopen = () => {
+    log('Connected.', 'sys');
+    send({type:'join', room, name});
+  };
+  ws.onclose = () => log('Disconnected.', 'sys');
+  ws.onerror = () => log('WebSocket error (see console).', 'err');
+
+  ws.onmessage = (evt) => {
+    let data;
+    try { data = JSON.parse(evt.data); } catch { return; }
+    switch(data.type){
+      case 'error': log('Error: ' + data.message, 'err'); break;
+      case 'joined': log(`Joined room ${data.room} as ${data.you}.`, 'sys'); break;
+      case 'system': log(data.text, 'sys'); break;
+      case 'waiting':
+        roleSpan.textContent = 'Waiting for more players…';
+        drawerWord.textContent = '';
+        isDrawer = false;
+        clearBtn.disabled = true;
+        break;
+      case 'role':
+        isDrawer = (data.role === 'drawer');
+        roleSpan.textContent = isDrawer ? 'You are the DRAWER' : `Drawer: ${data.drawerName}`;
+        drawerWord.textContent = '';
+        clearBtn.disabled = !isDrawer;
+        document.getElementById('wordOptions').innerHTML = '';
+        break;
+      case 'secret_word':
+        if (isDrawer) drawerWord.textContent = 'Your word: ' + data.word;
+        break;
+      case 'word_options':
+        if (isDrawer && Array.isArray(data.options)) {
+          const wrap = document.getElementById('wordOptions');
+          wrap.innerHTML = '';
+          data.options.forEach(w=>{
+            const b = document.createElement('button');
+            b.textContent = w;
+            b.onclick = ()=> send({type:'pick_word', word:w});
+            wrap.appendChild(b);
+          });
+        }
+        break;
+      case 'draw': drawPoint(data.x, data.y, data.drag); break;
+      case 'clear': clearCanvas(); break;
+      case 'chat': log(`${data.from}: ${data.text}`); break;
+      case 'feedback':
+        if (data.result === 'incorrect') log('Your guess was incorrect.', 'sys');
+        break;
+      case 'correct':
+        log(`${data.player} guessed correctly! Word was "${data.word}".`, 'me');
+        document.getElementById('wordOptions').innerHTML = '';
+        break;
+      case 'players':
+        renderPlayers(data.players || []);
+        break;
+      case 'room_settings':
+        currentMode = data.mode || 'random';
+        document.getElementById('modeRandom').disabled = (currentMode==='random');
+        document.getElementById('modeChoice').disabled = (currentMode==='choice');
+        break;
+    }
+  };
+}
+
+function renderPlayers(players){
+  const list = document.getElementById('playersList');
+  list.innerHTML = '';
+  isAdmin = false;
+  players.forEach(p=>{
+    const row = document.createElement('div');
+    row.textContent = p.name;
+    if (p.drawer) { const b = document.createElement('span'); b.className='badge drawer'; b.textContent='drawer'; row.appendChild(b); }
+    if (p.admin)  { const b = document.createElement('span'); b.className='badge admin';  b.textContent='admin';  row.appendChild(b);
+      if (p.name === document.getElementById('name').value.trim()) isAdmin = true; }
+    list.appendChild(row);
+  });
+  document.querySelectorAll('#panelAdmin button, #panelAdmin input').forEach(el=>{
+    if (el.id === 'tabAdmin') return;
+    el.disabled = !isAdmin && el.id !== 'tabAdmin';
+  });
+}
+
+function clearCanvas(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle = '#111';
+}
+
+function drawPoint(x, y, drag){
+  if (drag && last){
+    ctx.beginPath();
+    ctx.moveTo(last.x, last.y);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+    last = {x,y};
+  } else {
+    ctx.beginPath();
+    ctx.arc(x, y, 2, 0, Math.PI*2);
+    ctx.fill();
+    last = {x,y};
+  }
+}
+
+// Canvas events
+canvas.addEventListener('pointerdown', (e)=>{
+  if (!isDrawer) return;
+  drawing = true; last = null;
+  const r = canvas.getBoundingClientRect();
+  const x = e.clientX - r.left; const y = e.clientY - r.top;
+  drawPoint(x, y, false);
+  send({type:'draw', x, y, drag:false});
+});
+canvas.addEventListener('pointermove', (e)=>{
+  if (!isDrawer || !drawing) return;
+  const r = canvas.getBoundingClientRect();
+  const x = e.clientX - r.left; const y = e.clientY - r.top;
+  drawPoint(x, y, true);
+  send({type:'draw', x, y, drag:true});
+});
+['pointerup','pointercancel','pointerleave'].forEach(evt=>{
+  canvas.addEventListener(evt, ()=>{ drawing = false; last = null; });
+});
+
+// Chat/guess
+document.getElementById('sendBtn').onclick = ()=>{
+  const i = document.getElementById('msg');
+  const text = i.value.trim();
+  if (!text) return;
+  send({type:'guess', text});
+  i.value = '';
+};
+document.getElementById('msg').addEventListener('keydown', (e)=>{
+  if (e.key === 'Enter') document.getElementById('sendBtn').click();
+});
+
+// Join button
+document.getElementById('joinBtn').onclick = ()=>connect();
+
+// Tabs
+const tabs = [
+  {btn:'tabChat', panel:'panelChat'},
+  {btn:'tabPlayers', panel:'panelPlayers'},
+  {btn:'tabAdmin', panel:'panelAdmin'},
+];
+tabs.forEach(t=>{
+  document.getElementById(t.btn).onclick = ()=>{
+    tabs.forEach(x=>{
+      document.getElementById(x.btn).classList.toggle('active', x.btn===t.btn);
+      document.getElementById(x.panel).classList.toggle('active', x.panel===t.panel);
+    });
+  };
+});
+
+// Admin panel actions
+document.getElementById('modeRandom').onclick = ()=> send({type:'admin', action:'mode', mode:'random'});
+document.getElementById('modeChoice').onclick = ()=> send({type:'admin', action:'mode', mode:'choice'});
+document.getElementById('lockRoom').onclick = ()=> send({type:'admin', action:'lock'});
+document.getElementById('unlockRoom').onclick = ()=> send({type:'admin', action:'unlock'});
+document.getElementById('kickBtn').onclick = ()=>{
+  const n = document.getElementById('kickName').value.trim();
+  if (n) send({type:'admin', action:'kick', name:n});
+};
+
+// Init canvas
+clearCanvas();
+</script>
+</body>
+</html>
