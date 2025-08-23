@@ -103,6 +103,7 @@ const roleSpan = document.getElementById('role');
 const drawerWord = document.getElementById('drawerWord');
 const clearBtn = document.getElementById('clearBtn');
 const input = document.getElementById('msg');
+const sendBtn = document.getElementById('sendBtn');
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 ctx.lineWidth = 4;
@@ -122,6 +123,12 @@ function send(obj) {
   if (ws && ws.readyState === 1) {
     ws.send(JSON.stringify(obj));
   }
+}
+
+function setTypingEnabled(enabled, placeholder=''){
+  input.disabled = !enabled;
+  sendBtn.disabled = !enabled;
+  if (placeholder) input.placeholder = placeholder;
 }
 
 function connect() {
@@ -150,7 +157,7 @@ function connect() {
         drawerWord.textContent = '';
         isDrawer = false;
         clearBtn.disabled = true;
-        input.placeholder = 'Type a guess or chat…';
+        setTypingEnabled(true, 'Type a guess or chat…');
         break;
       case 'role':
         isDrawer = (data.role === 'drawer');
@@ -158,7 +165,13 @@ function connect() {
         drawerWord.textContent = '';
         clearBtn.disabled = !isDrawer;
         document.getElementById('wordOptions').innerHTML = '';
-        input.placeholder = isDrawer ? 'Chat to players… (drawer cannot guess)' : 'Type a guess or chat…';
+        if (isDrawer) {
+          // drawer cannot type at all
+          setTypingEnabled(false, 'Drawer cannot chat');
+          input.value = '';
+        } else {
+          setTypingEnabled(true, 'Type a guess or chat…');
+        }
         break;
       case 'secret_word':
         if (isDrawer) drawerWord.textContent = 'Your word: ' + data.word;
@@ -260,45 +273,45 @@ canvas.addEventListener('pointermove', (e)=>{
   canvas.addEventListener(evt, ()=>{ drawing = false; last = null; });
 });
 
-// Chat/guess
-document.getElementById('sendBtn').onclick = ()=>{
+// Chat/guess send
+sendBtn.onclick = ()=>{
   const text = input.value.trim();
   if (!text) return;
-  if (isDrawer) {
-    send({type:'chat', text});     // drawer can chat only
-  } else {
-    send({type:'guess', text});    // guessers send guesses
-  }
+  // If drawer, input is disabled anyway. Extra guard:
+  if (isDrawer) return;
+  send({type:'guess', text});
   input.value = '';
 };
 input.addEventListener('keydown', (e)=>{
-  if (e.key === 'Enter') document.getElementById('sendBtn').click();
+  if (e.key === 'Enter') sendBtn.click();
 });
 
 // Join button
 document.getElementById('joinBtn').onclick = ()=>connect();
 
 // Tabs
-const tabs = [
-  {btn:'tabChat', panel:'panelChat'},
-  {btn:'tabPlayers', panel:'panelPlayers'},
-  {btn:'panelAdmin', panel:'panelAdmin'},
-];
 document.getElementById('tabChat').onclick = ()=>switchTab('panelChat');
 document.getElementById('tabPlayers').onclick = ()=>switchTab('panelPlayers');
 document.getElementById('tabAdmin').onclick = ()=>switchTab('panelAdmin');
-
 function switchTab(id){
   ['panelChat','panelPlayers','panelAdmin'].forEach(pid=>{
     document.getElementById(pid).classList.toggle('active', pid===id);
   });
   ['tabChat','tabPlayers','tabAdmin'].forEach(tid=>{
-    document.getElementById(tid).classList.toggle('active', 
-      (tid==='tabChat' && id==='panelChat') ||
-      (tid==='tabPlayers' && id==='panelPlayers') ||
-      (tid==='tabAdmin' && id==='panelAdmin'));
+    const map = {tabChat:'panelChat', tabPlayers:'panelPlayers', tabAdmin:'panelAdmin'};
+    document.getElementById(tid).classList.toggle('active', map[tid]===id);
   });
 }
+
+// Admin actions
+document.getElementById('modeRandom').onclick = ()=> send({type:'admin', action:'mode', mode:'random'});
+document.getElementById('modeChoice').onclick = ()=> send({type:'admin', action:'mode', mode:'choice'});
+document.getElementById('lockRoom').onclick = ()=> send({type:'admin', action:'lock'});
+document.getElementById('unlockRoom').onclick = ()=> send({type:'admin', action:'unlock'});
+document.getElementById('kickBtn').onclick = ()=>{
+  const n = document.getElementById('kickName').value.trim();
+  if (n) send({type:'admin', action:'kick', name:n});
+};
 
 // Init canvas
 clearCanvas();
