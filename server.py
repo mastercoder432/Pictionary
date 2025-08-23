@@ -27,6 +27,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/")
+def health():
+    return {"ok": True}
+
 # ===== State =====
 class Client:
     def __init__(self, ws: WebSocket, name: str):
@@ -55,7 +59,7 @@ async def safe_send(ws: WebSocket, payload: dict):
 async def broadcast(room: RoomState, payload: dict, exclude: Optional[Client] = None):
     data = json.dumps(payload)
     dead = []
-    for c in room.clients:
+    for c in list(room.clients):
         if exclude is not None and c is exclude:
             continue
         try:
@@ -63,10 +67,8 @@ async def broadcast(room: RoomState, payload: dict, exclude: Optional[Client] = 
         except Exception:
             dead.append(c)
     for d in dead:
-        try:
+        if d in room.clients:
             room.clients.remove(d)
-        except ValueError:
-            pass
 
 def choose_word() -> str:
     import random
@@ -95,8 +97,16 @@ async def send_room_settings(room: RoomState, to: Optional[Client]=None):
         await broadcast(room, payload)
 
 async def assign_admin_if_needed(room: RoomState):
+    # ensure exactly one admin: first client in the list gets admin if none
     if room.clients and not any(c.is_admin for c in room.clients):
         room.clients[0].is_admin = True
+    # if somehow multiple admins existed, keep only the first as admin
+    seen = False
+    for c in room.clients:
+        if c.is_admin and not seen:
+            seen = True
+        else:
+            c.is_admin = False
 
 async def rotate_and_start_round(room: RoomState):
     if len(room.clients) < 2:
@@ -122,7 +132,9 @@ async def rotate_and_start_round(room: RoomState):
         await safe_send(drawer.ws, {"type":"secret_word","word":room.current_word})
     else:
         options = choose_options(3)
+        # tell drawer to choose, and block drawing until chosen
         await safe_send(drawer.ws, {"type":"word_options","options":options})
+        await safe_send(drawer.ws, {"type":"system","text":"Choose a word from the options above before drawing."})
 
     await send_players(room)
     await send_room_settings(room)
@@ -181,8 +193,11 @@ async def ws_endpoint(ws: WebSocket):
             state = rooms[room_code]
             tick_and_rate_limit(client_obj)
 
+            # DRAW (drawer only; blocked in 'choice' until word chosen)
             if msg_type == "draw":
                 if not client_obj.is_drawer:
+                    continue
+                if state.mode == "choice" and not state.current_word:
                     continue
                 client_obj.draw_count += 1
                 if client_obj.draw_count > DRAW_RATE_PER_SEC:
@@ -192,16 +207,23 @@ async def ws_endpoint(ws: WebSocket):
                     continue
                 await broadcast(state, {"type":"draw","x":x,"y":y,"drag":drag}, exclude=client_obj)
 
+            # CLEAR (drawer only)
             elif msg_type == "clear":
                 if client_obj.is_drawer:
                     await broadcast(state, {"type":"clear"})
 
+            # CHAT (everyone)
             elif msg_type == "chat":
                 text = str(data.get("text",""))[:200]
                 if text:
                     await broadcast(state, {"type":"chat","from":client_obj.name,"text":text})
 
+            # GUESS (everyone EXCEPT drawer)
             elif msg_type == "guess":
+                if client_obj.is_drawer:
+                    # drawer cannot guess
+                    await safe_send(ws, {"type":"system","text":"Drawer cannot guess."})
+                    continue
                 client_obj.guess_count += 1
                 if client_obj.guess_count > GUESS_RATE_PER_SEC:
                     continue
@@ -217,7 +239,10 @@ async def ws_endpoint(ws: WebSocket):
                         if ROUND_CLEAR_ON_CORRECT:
                             await broadcast(state, {"type":"clear"})
                         await rotate_and_start_round(state)
+                else:
+                    await safe_send(ws, {"type":"feedback","result":"incorrect"})
 
+            # PICK WORD (choice mode; drawer only)
             elif msg_type == "pick_word":
                 if not client_obj.is_drawer:
                     continue
@@ -226,6 +251,7 @@ async def ws_endpoint(ws: WebSocket):
                     state.current_word = word
                     await safe_send(client_obj.ws, {"type":"secret_word","word":state.current_word})
 
+            # ADMIN COMMANDS (auto-admin = first joiner)
             elif msg_type == "admin":
                 if not client_obj.is_admin:
                     await safe_send(ws, {"type":"error","message":"Admin only"})
@@ -266,8 +292,8 @@ async def ws_endpoint(ws: WebSocket):
                 was_drawer = client_obj.is_drawer
                 state.clients.remove(client_obj)
 
-                if state.clients and not any(c.is_admin for c in state.clients):
-                    state.clients[0].is_admin = True
+                # re-affirm single admin (first in list) after a leave
+                await assign_admin_if_needed(state)
 
                 if state.clients:
                     if idx < state.drawer_index or state.drawer_index >= len(state.clients):
