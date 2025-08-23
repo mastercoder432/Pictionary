@@ -70,7 +70,7 @@
 
     <div id="panelAdmin" class="panel">
       <div style="padding:10px; display:flex; flex-direction:column; gap:10px;">
-        <div><b>Room Settings</b></div>
+        <div><b>Admin Controls</b></div>
         <div>Mode:
           <button id="modeRandom">Random</button>
           <button id="modeChoice">Choice</button>
@@ -83,7 +83,6 @@
           <input id="kickName" placeholder="Exact name" />
           <button id="kickBtn">Kick</button>
         </div>
-        <div style="font-size:12px;color:#666;">(Admin = first person to join the room.)</div>
       </div>
     </div>
   </div>
@@ -103,6 +102,7 @@ const chat = document.getElementById('chat');
 const roleSpan = document.getElementById('role');
 const drawerWord = document.getElementById('drawerWord');
 const clearBtn = document.getElementById('clearBtn');
+const input = document.getElementById('msg');
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 ctx.lineWidth = 4;
@@ -150,6 +150,7 @@ function connect() {
         drawerWord.textContent = '';
         isDrawer = false;
         clearBtn.disabled = true;
+        input.placeholder = 'Type a guess or chat…';
         break;
       case 'role':
         isDrawer = (data.role === 'drawer');
@@ -157,12 +158,14 @@ function connect() {
         drawerWord.textContent = '';
         clearBtn.disabled = !isDrawer;
         document.getElementById('wordOptions').innerHTML = '';
+        input.placeholder = isDrawer ? 'Chat to players… (drawer cannot guess)' : 'Type a guess or chat…';
         break;
       case 'secret_word':
         if (isDrawer) drawerWord.textContent = 'Your word: ' + data.word;
         break;
       case 'word_options':
         if (isDrawer && Array.isArray(data.options)) {
+          log('You are the drawer. Choose ONE word before drawing.', 'sys');
           const wrap = document.getElementById('wordOptions');
           wrap.innerHTML = '';
           data.options.forEach(w=>{
@@ -199,17 +202,19 @@ function renderPlayers(players){
   const list = document.getElementById('playersList');
   list.innerHTML = '';
   isAdmin = false;
+  const myName = document.getElementById('name').value.trim();
   players.forEach(p=>{
     const row = document.createElement('div');
     row.textContent = p.name;
     if (p.drawer) { const b = document.createElement('span'); b.className='badge drawer'; b.textContent='drawer'; row.appendChild(b); }
     if (p.admin)  { const b = document.createElement('span'); b.className='badge admin';  b.textContent='admin';  row.appendChild(b);
-      if (p.name === document.getElementById('name').value.trim()) isAdmin = true; }
+      if (p.name === myName) isAdmin = true; }
     list.appendChild(row);
   });
+  // Enable admin controls for admin only
   document.querySelectorAll('#panelAdmin button, #panelAdmin input').forEach(el=>{
     if (el.id === 'tabAdmin') return;
-    el.disabled = !isAdmin && el.id !== 'tabAdmin';
+    el.disabled = !isAdmin;
   });
 }
 
@@ -257,13 +262,16 @@ canvas.addEventListener('pointermove', (e)=>{
 
 // Chat/guess
 document.getElementById('sendBtn').onclick = ()=>{
-  const i = document.getElementById('msg');
-  const text = i.value.trim();
+  const text = input.value.trim();
   if (!text) return;
-  send({type:'guess', text});
-  i.value = '';
+  if (isDrawer) {
+    send({type:'chat', text});     // drawer can chat only
+  } else {
+    send({type:'guess', text});    // guessers send guesses
+  }
+  input.value = '';
 };
-document.getElementById('msg').addEventListener('keydown', (e)=>{
+input.addEventListener('keydown', (e)=>{
   if (e.key === 'Enter') document.getElementById('sendBtn').click();
 });
 
@@ -274,26 +282,23 @@ document.getElementById('joinBtn').onclick = ()=>connect();
 const tabs = [
   {btn:'tabChat', panel:'panelChat'},
   {btn:'tabPlayers', panel:'panelPlayers'},
-  {btn:'tabAdmin', panel:'panelAdmin'},
+  {btn:'panelAdmin', panel:'panelAdmin'},
 ];
-tabs.forEach(t=>{
-  document.getElementById(t.btn).onclick = ()=>{
-    tabs.forEach(x=>{
-      document.getElementById(x.btn).classList.toggle('active', x.btn===t.btn);
-      document.getElementById(x.panel).classList.toggle('active', x.panel===t.panel);
-    });
-  };
-});
+document.getElementById('tabChat').onclick = ()=>switchTab('panelChat');
+document.getElementById('tabPlayers').onclick = ()=>switchTab('panelPlayers');
+document.getElementById('tabAdmin').onclick = ()=>switchTab('panelAdmin');
 
-// Admin panel actions
-document.getElementById('modeRandom').onclick = ()=> send({type:'admin', action:'mode', mode:'random'});
-document.getElementById('modeChoice').onclick = ()=> send({type:'admin', action:'mode', mode:'choice'});
-document.getElementById('lockRoom').onclick = ()=> send({type:'admin', action:'lock'});
-document.getElementById('unlockRoom').onclick = ()=> send({type:'admin', action:'unlock'});
-document.getElementById('kickBtn').onclick = ()=>{
-  const n = document.getElementById('kickName').value.trim();
-  if (n) send({type:'admin', action:'kick', name:n});
-};
+function switchTab(id){
+  ['panelChat','panelPlayers','panelAdmin'].forEach(pid=>{
+    document.getElementById(pid).classList.toggle('active', pid===id);
+  });
+  ['tabChat','tabPlayers','tabAdmin'].forEach(tid=>{
+    document.getElementById(tid).classList.toggle('active', 
+      (tid==='tabChat' && id==='panelChat') ||
+      (tid==='tabPlayers' && id==='panelPlayers') ||
+      (tid==='tabAdmin' && id==='panelAdmin'));
+  });
+}
 
 // Init canvas
 clearCanvas();
