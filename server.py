@@ -100,7 +100,7 @@ async def assign_admin_if_needed(room: RoomState):
     # ensure exactly one admin: first client in the list gets admin if none
     if room.clients and not any(c.is_admin for c in room.clients):
         room.clients[0].is_admin = True
-    # if somehow multiple admins existed, keep only the first as admin
+    # if multiple admins existed, keep only the first
     seen = False
     for c in room.clients:
         if c.is_admin and not seen:
@@ -110,6 +110,8 @@ async def assign_admin_if_needed(room: RoomState):
 
 async def rotate_and_start_round(room: RoomState):
     if len(room.clients) < 2:
+        # make sure clients (incl. first joiner) see who the admin is
+        await send_players(room)
         for c in room.clients:
             await safe_send(c.ws, {"type":"waiting"})
         return
@@ -180,6 +182,7 @@ async def ws_endpoint(ws: WebSocket):
                 await assign_admin_if_needed(state)
                 await safe_send(ws, {"type":"joined","room":room_code,"you":name})
                 await send_room_settings(state, to=client_obj)
+                await send_players(state)  # <-- ensure admin buttons enable immediately
                 await broadcast(state, {"type":"system","text":f"{name} joined."})
 
                 await rotate_and_start_round(state)
@@ -212,8 +215,11 @@ async def ws_endpoint(ws: WebSocket):
                 if client_obj.is_drawer:
                     await broadcast(state, {"type":"clear"})
 
-            # CHAT (everyone)
+            # CHAT (everyone EXCEPT drawer — drawer chat blocked to prevent giving away answers)
             elif msg_type == "chat":
+                if client_obj.is_drawer:
+                    await safe_send(ws, {"type":"system","text":"Drawer cannot chat during their turn."})
+                    continue
                 text = str(data.get("text",""))[:200]
                 if text:
                     await broadcast(state, {"type":"chat","from":client_obj.name,"text":text})
@@ -221,7 +227,6 @@ async def ws_endpoint(ws: WebSocket):
             # GUESS (everyone EXCEPT drawer)
             elif msg_type == "guess":
                 if client_obj.is_drawer:
-                    # drawer cannot guess
                     await safe_send(ws, {"type":"system","text":"Drawer cannot guess."})
                     continue
                 client_obj.guess_count += 1
@@ -292,8 +297,7 @@ async def ws_endpoint(ws: WebSocket):
                 was_drawer = client_obj.is_drawer
                 state.clients.remove(client_obj)
 
-                # re-affirm single admin (first in list) after a leave
-                await assign_admin_if_needed(state)
+                await assign_admin_if_needed(state)  # keep first as admin
 
                 if state.clients:
                     if idx < state.drawer_index or state.drawer_index >= len(state.clients):
