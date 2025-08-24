@@ -1,5 +1,6 @@
 <!doctype html>
 <html lang="en">
+// Desingning the Webpage
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -88,9 +89,10 @@
   </div>
 
 <script>
-// Hard-wired WebSocket URL:
+// The Server Link
 const WS_URL = "wss://pictionary-1-b76g.onrender.com/ws";
 
+//Defining the Variables
 let ws = null;
 let isDrawer = false;
 let isAdmin = false;
@@ -118,7 +120,7 @@ function log(text, cls='') {
   chat.appendChild(p);
   chat.scrollTop = chat.scrollHeight;
 }
-
+// How to Send to the Server
 function send(obj) {
   if (ws && ws.readyState === 1) {
     ws.send(JSON.stringify(obj));
@@ -130,7 +132,8 @@ function setTypingEnabled(enabled, placeholder=''){
   sendBtn.disabled = !enabled;
   if (placeholder) input.placeholder = placeholder;
 }
-
+  
+// Connect to the Server
 function connect() {
   const server = WS_URL;
   const room = (document.getElementById('room').value.trim() || '').toUpperCase();
@@ -253,7 +256,7 @@ function drawPoint(x, y, drag){
   }
 }
 
-// Canvas events
+// Canvas Events
 canvas.addEventListener('pointerdown', (e)=>{
   if (!isDrawer) return;
   drawing = true; last = null;
@@ -273,7 +276,7 @@ canvas.addEventListener('pointermove', (e)=>{
   canvas.addEventListener(evt, ()=>{ drawing = false; last = null; });
 });
 
-// Chat/guess send
+// Send Guesses
 sendBtn.onclick = ()=>{
   const text = input.value.trim();
   if (!text) return;
@@ -303,7 +306,7 @@ function switchTab(id){
   });
 }
 
-// Admin actions
+// Admin Actions
 document.getElementById('modeRandom').onclick = ()=> send({type:'admin', action:'mode', mode:'random'});
 document.getElementById('modeChoice').onclick = ()=> send({type:'admin', action:'mode', mode:'choice'});
 document.getElementById('lockRoom').onclick = ()=> send({type:'admin', action:'lock'});
@@ -313,7 +316,7 @@ document.getElementById('kickBtn').onclick = ()=>{
   if (n) send({type:'admin', action:'kick', name:n});
 };
 
-// Init canvas
+// Run the Canvas
 clearCanvas();
 </script>
 </body>
