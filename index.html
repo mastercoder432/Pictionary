@@ -1,6 +1,5 @@
 <!doctype html>
 <html lang="en">
-// Desingning the Webpage
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -11,7 +10,7 @@
   #topbar { padding:10px; display:flex; gap:8px; align-items:center; border-bottom:1px solid #ddd; flex-wrap:wrap; }
   #canvasWrap { flex:1 1 auto; display:flex; align-items:center; justify-content:center; background:#f7f7f7; }
   #c { background:#fff; border:1px solid #ddd; touch-action:none; max-width:100%; height:auto; }
-  #right { width:360px; border-left:1px solid #ddd; display:flex; flex-direction:column; }
+  #right { width:380px; border-left:1px solid #ddd; display:flex; flex-direction:column; }
   #chat { flex:1 1 auto; overflow:auto; padding:10px; background:#fff; }
   #entry { display:flex; gap:6px; padding:10px; border-top:1px solid #eee; }
   #entry input { flex:1 1 auto; padding:8px; }
@@ -30,6 +29,11 @@
   .badge.admin { background:#a3d9ff; }
   #wordOptions { display:flex; gap:8px; margin-left: auto; }
   #wordOptions button { padding:4px 8px; }
+  /* Tools */
+  #tools { display:flex; gap:8px; align-items:center; margin-left:auto; }
+  .swatch { width:20px; height:20px; border-radius:50%; border:1px solid #aaa; cursor:pointer; }
+  .swatch.active { outline:2px solid black; }
+  #eraserBtn.active { outline:2px solid black; }
 </style>
 </head>
 <body>
@@ -41,10 +45,27 @@
       <input id="name" placeholder="Your name" size="12" />
       <button id="joinBtn">Join</button>
       <span id="role"></span>
+
       <div id="wordOptions"></div>
-      <span id="drawerWord" style="margin-left:auto;color:#a00;"></span>
-      <button id="clearBtn" disabled>Clear</button>
+      <span id="drawerWord" style="margin-left:12px;color:#a00;"></span>
+
+      <!-- Drawer tools -->
+      <div id="tools">
+        <div id="palette">
+          <span class="swatch" data-color="#111" style="background:#111"></span>
+          <span class="swatch" data-color="#e53935" style="background:#e53935"></span>
+          <span class="swatch" data-color="#1e88e5" style="background:#1e88e5"></span>
+          <span class="swatch" data-color="#43a047" style="background:#43a047"></span>
+          <span class="swatch" data-color="#fdd835" style="background:#fdd835"></span>
+          <span class="swatch" data-color="#8e24aa" style="background:#8e24aa"></span>
+          <span class="swatch" data-color="#fb8c00" style="background:#fb8c00"></span>
+        </div>
+        <label>Size <input type="range" id="size" min="2" max="24" value="4" /></label>
+        <button id="eraserBtn">Eraser</button>
+        <button id="clearBtn" disabled>Clear</button>
+      </div>
     </div>
+
     <div id="canvasWrap">
       <canvas id="c" width="900" height="600"></canvas>
     </div>
@@ -84,15 +105,22 @@
           <input id="kickName" placeholder="Exact name" />
           <button id="kickBtn">Kick</button>
         </div>
+        <div>Make admin:
+          <input id="makeAdminName" placeholder="Exact name" />
+          <button id="makeAdminBtn">Make Admin</button>
+        </div>
+        <div>Revoke admin:
+          <input id="revokeAdminName" placeholder="Exact name" />
+          <button id="revokeAdminBtn">Revoke Admin</button>
+        </div>
       </div>
     </div>
   </div>
 
 <script>
-// The Server Link
+// Hard-wired WebSocket URL:
 const WS_URL = "wss://pictionary-1-b76g.onrender.com/ws";
 
-//Defining the Variables
 let ws = null;
 let isDrawer = false;
 let isAdmin = false;
@@ -100,18 +128,25 @@ let drawing = false;
 let last = null;
 let currentMode = "random";
 
+// Tools state
+let eraseMode = false;
+let brushColor = "#111";
+let brushSize = 4;
+
 const chat = document.getElementById('chat');
 const roleSpan = document.getElementById('role');
 const drawerWord = document.getElementById('drawerWord');
 const clearBtn = document.getElementById('clearBtn');
 const input = document.getElementById('msg');
 const sendBtn = document.getElementById('sendBtn');
+const joinBtn = document.getElementById('joinBtn');
+const roomInp = document.getElementById('room');
+const nameInp = document.getElementById('name');
+
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
-ctx.lineWidth = 4;
 ctx.lineJoin = 'round';
 ctx.lineCap = 'round';
-ctx.strokeStyle = '#111';
 
 function log(text, cls='') {
   const p = document.createElement('div');
@@ -120,7 +155,7 @@ function log(text, cls='') {
   chat.appendChild(p);
   chat.scrollTop = chat.scrollHeight;
 }
-// How to Send to the Server
+
 function send(obj) {
   if (ws && ws.readyState === 1) {
     ws.send(JSON.stringify(obj));
@@ -132,20 +167,29 @@ function setTypingEnabled(enabled, placeholder=''){
   sendBtn.disabled = !enabled;
   if (placeholder) input.placeholder = placeholder;
 }
-  
-// Connect to the Server
+
 function connect() {
   const server = WS_URL;
-  const room = (document.getElementById('room').value.trim() || '').toUpperCase();
-  const name = document.getElementById('name').value.trim() || 'Player';
+  const room = (roomInp.value.trim() || '').toUpperCase();
+  const name = nameInp.value.trim() || 'Player';
   if (!server) return log('Server URL not configured.', 'err');
 
+  // prevent duplicate joins from same tab
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    try { ws.close(); } catch(e){}
+  }
+
   ws = new WebSocket(server);
+  joinBtn.disabled = true; roomInp.disabled = true; nameInp.disabled = true;
+
   ws.onopen = () => {
     log('Connected.', 'sys');
     send({type:'join', room, name});
   };
-  ws.onclose = () => log('Disconnected.', 'sys');
+  ws.onclose = () => {
+    log('Disconnected.', 'sys');
+    joinBtn.disabled = false; roomInp.disabled = false; nameInp.disabled = false;
+  };
   ws.onerror = () => log('WebSocket error (see console).', 'err');
 
   ws.onmessage = (evt) => {
@@ -153,7 +197,14 @@ function connect() {
     try { data = JSON.parse(evt.data); } catch { return; }
     switch(data.type){
       case 'error': log('Error: ' + data.message, 'err'); break;
-      case 'joined': log(`Joined room ${data.room} as ${data.you}.`, 'sys'); break;
+      case 'joined':
+        // might be renamed by server to unique name
+        if (data.you && data.you !== nameInp.value.trim()) {
+          nameInp.value = data.you;
+          log(`Your name is set to ${data.you}.`, 'sys');
+        }
+        log(`Joined room ${data.room} as ${data.you}.`, 'sys');
+        break;
       case 'system': log(data.text, 'sys'); break;
       case 'waiting':
         roleSpan.textContent = 'Waiting for more players…';
@@ -169,12 +220,12 @@ function connect() {
         clearBtn.disabled = !isDrawer;
         document.getElementById('wordOptions').innerHTML = '';
         if (isDrawer) {
-          // drawer cannot type at all
           setTypingEnabled(false, 'Drawer cannot chat');
           input.value = '';
         } else {
           setTypingEnabled(true, 'Type a guess or chat…');
         }
+        updateToolUI();
         break;
       case 'secret_word':
         if (isDrawer) drawerWord.textContent = 'Your word: ' + data.word;
@@ -192,7 +243,7 @@ function connect() {
           });
         }
         break;
-      case 'draw': drawPoint(data.x, data.y, data.drag); break;
+      case 'draw': drawRemote(data); break;
       case 'clear': clearCanvas(); break;
       case 'chat': log(`${data.from}: ${data.text}`); break;
       case 'feedback':
@@ -207,8 +258,8 @@ function connect() {
         break;
       case 'room_settings':
         currentMode = data.mode || 'random';
-        document.getElementById('modeRandom').disabled = (currentMode==='random');
-        document.getElementById('modeChoice').disabled = (currentMode==='choice');
+        document.getElementById('modeRandom').disabled = (currentMode==='random') || !isAdmin;
+        document.getElementById('modeChoice').disabled = (currentMode==='choice') || !isAdmin;
         break;
     }
   };
@@ -218,7 +269,7 @@ function renderPlayers(players){
   const list = document.getElementById('playersList');
   list.innerHTML = '';
   isAdmin = false;
-  const myName = document.getElementById('name').value.trim();
+  const myName = nameInp.value.trim();
   players.forEach(p=>{
     const row = document.createElement('div');
     row.textContent = p.name;
@@ -227,61 +278,139 @@ function renderPlayers(players){
       if (p.name === myName) isAdmin = true; }
     list.appendChild(row);
   });
-  // Enable admin controls for admin only
+  // gate admin controls
   document.querySelectorAll('#panelAdmin button, #panelAdmin input').forEach(el=>{
     if (el.id === 'tabAdmin') return;
-    el.disabled = !isAdmin;
+    if (['modeRandom','modeChoice','lockRoom','unlockRoom','kickBtn','makeAdminBtn','revokeAdminBtn','kickName','makeAdminName','revokeAdminName'].includes(el.id)) {
+      el.disabled = !isAdmin;
+    }
   });
+  updateToolUI();
+}
+
+function updateToolUI(){
+  // Drawer tools only usable by drawer
+  document.querySelectorAll('.swatch, #size, #eraserBtn, #clearBtn').forEach(el=>{
+    el.disabled = !isDrawer;
+  });
+  // highlight active color / eraser
+  document.querySelectorAll('.swatch').forEach(s=>{
+    s.classList.toggle('active', s.dataset.color === brushColor && !eraseMode && isDrawer);
+  });
+  document.getElementById('eraserBtn').classList.toggle('active', eraseMode && isDrawer);
 }
 
 function clearCanvas(){
+  ctx.globalCompositeOperation = 'source-over';
   ctx.clearRect(0,0,canvas.width,canvas.height);
   ctx.fillStyle = '#fff';
   ctx.fillRect(0,0,canvas.width,canvas.height);
-  ctx.fillStyle = '#111';
 }
 
-function drawPoint(x, y, drag){
-  if (drag && last){
-    ctx.beginPath();
-    ctx.moveTo(last.x, last.y);
-    ctx.lineTo(x, y);
-    ctx.stroke();
-    last = {x,y};
+function drawStroke(from, to, color, size, erase){
+  ctx.save();
+  ctx.lineWidth = size;
+  if (erase) {
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.strokeStyle = 'rgba(0,0,0,1)';
   } else {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.strokeStyle = color || '#111';
+  }
+  ctx.beginPath();
+  ctx.moveTo(from.x, from.y);
+  ctx.lineTo(to.x, to.y);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawDot(p, color, size, erase){
+  ctx.save();
+  if (erase) {
+    ctx.globalCompositeOperation = 'destination-out';
     ctx.beginPath();
-    ctx.arc(x, y, 2, 0, Math.PI*2);
+    ctx.arc(p.x, p.y, size/2, 0, Math.PI*2);
     ctx.fill();
-    last = {x,y};
+  } else {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = color || '#111';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, size/2, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawRemote(d){
+  const p = {x: d.x, y: d.y};
+  const drag = !!d.drag;
+  const color = d.color || '#111';
+  const size = d.size || 4;
+  const erase = !!d.erase;
+  if (drag && last){
+    drawStroke(last, p, color, size, erase);
+    last = p;
+  } else {
+    drawDot(p, color, size, erase);
+    last = p;
   }
 }
 
-// Canvas Events
+// Canvas events
 canvas.addEventListener('pointerdown', (e)=>{
   if (!isDrawer) return;
   drawing = true; last = null;
   const r = canvas.getBoundingClientRect();
-  const x = e.clientX - r.left; const y = e.clientY - r.top;
-  drawPoint(x, y, false);
-  send({type:'draw', x, y, drag:false});
+  const pos = { x: e.clientX - r.left, y: e.clientY - r.top };
+  drawDot(pos, brushColor, brushSize, eraseMode);
+  send({type:'draw', x: pos.x, y: pos.y, drag:false, color: brushColor, size: brushSize, erase: eraseMode});
 });
 canvas.addEventListener('pointermove', (e)=>{
   if (!isDrawer || !drawing) return;
   const r = canvas.getBoundingClientRect();
-  const x = e.clientX - r.left; const y = e.clientY - r.top;
-  drawPoint(x, y, true);
-  send({type:'draw', x, y, drag:true});
+  const pos = { x: e.clientX - r.left, y: e.clientY - r.top };
+  if (last){
+    drawStroke(last, pos, brushColor, brushSize, eraseMode);
+  } else {
+    drawDot(pos, brushColor, brushSize, eraseMode);
+  }
+  last = pos;
+  send({type:'draw', x: pos.x, y: pos.y, drag:true, color: brushColor, size: brushSize, erase: eraseMode});
 });
 ['pointerup','pointercancel','pointerleave'].forEach(evt=>{
   canvas.addEventListener(evt, ()=>{ drawing = false; last = null; });
 });
 
-// Send Guesses
+// Tools UI
+document.querySelectorAll('.swatch').forEach(s=>{
+  s.addEventListener('click', ()=>{
+    if (!isDrawer) return;
+    eraseMode = false;
+    brushColor = s.dataset.color;
+    updateToolUI();
+  });
+});
+document.getElementById('size').addEventListener('input', (e)=>{
+  brushSize = parseInt(e.target.value || '4', 10);
+});
+document.getElementById('eraserBtn').onclick = ()=>{
+  if (!isDrawer) return;
+  eraseMode = !eraseMode;
+  updateToolUI();
+};
+
+// Clear (instant local + server broadcast)
+clearBtn.onclick = ()=>{
+  if (!isDrawer) return;
+  clearCanvas();
+  send({type:'clear'});
+};
+
+// Chat/guess send
 sendBtn.onclick = ()=>{
   const text = input.value.trim();
   if (!text) return;
-  // If drawer, input is disabled anyway. Extra guard:
-  if (isDrawer) return;
+  if (isDrawer) return;               // drawer cannot send anything
   send({type:'guess', text});
   input.value = '';
 };
@@ -289,10 +418,8 @@ input.addEventListener('keydown', (e)=>{
   if (e.key === 'Enter') sendBtn.click();
 });
 
-// Join button
-document.getElementById('joinBtn').onclick = ()=>connect();
-
-// Tabs
+// Join + Tabs
+joinBtn.onclick = ()=>connect();
 document.getElementById('tabChat').onclick = ()=>switchTab('panelChat');
 document.getElementById('tabPlayers').onclick = ()=>switchTab('panelPlayers');
 document.getElementById('tabAdmin').onclick = ()=>switchTab('panelAdmin');
@@ -306,7 +433,7 @@ function switchTab(id){
   });
 }
 
-// Admin Actions
+// Admin actions
 document.getElementById('modeRandom').onclick = ()=> send({type:'admin', action:'mode', mode:'random'});
 document.getElementById('modeChoice').onclick = ()=> send({type:'admin', action:'mode', mode:'choice'});
 document.getElementById('lockRoom').onclick = ()=> send({type:'admin', action:'lock'});
@@ -315,8 +442,16 @@ document.getElementById('kickBtn').onclick = ()=>{
   const n = document.getElementById('kickName').value.trim();
   if (n) send({type:'admin', action:'kick', name:n});
 };
+document.getElementById('makeAdminBtn').onclick = ()=>{
+  const n = document.getElementById('makeAdminName').value.trim();
+  if (n) send({type:'admin', action:'make_admin', name:n});
+};
+document.getElementById('revokeAdminBtn').onclick = ()=>{
+  const n = document.getElementById('revokeAdminName').value.trim();
+  if (n) send({type:'admin', action:'revoke_admin', name:n});
+};
 
-// Run the Canvas
+// Init canvas
 clearCanvas();
 </script>
 </body>
