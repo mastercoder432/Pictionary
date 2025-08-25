@@ -1,15 +1,26 @@
-import json, secrets, time
+import json, secrets, time, re
 from typing import Dict, List, Optional
 from collections import defaultdict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 # ===== Config =====
-ALLOWED_ORIGINS = ["*"]  # tighten in production
+ALLOWED_ORIGINS = ["*"]  # tighten in production (e.g. your domain)
 MAX_MSG_BYTES = 16_384
-DRAW_RATE_PER_SEC = 120
+DRAW_RATE_PER_SEC = 160
 GUESS_RATE_PER_SEC = 8
 ROUND_CLEAR_ON_CORRECT = True
+
+# Basic, editable profanity list. Add more entries as needed.
+BAD_WORDS = {
+    "badword", "dummy", "stupid"  # <-- extend this set
+}
+BAD_WORDS_RE = re.compile(r"\b(" + "|".join(re.escape(w) for w in BAD_WORDS) + r")\b", re.IGNORECASE) if BAD_WORDS else None
+
+def censor(text: str) -> str:
+    if not text or not BAD_WORDS_RE:
+        return text
+    return BAD_WORDS_RE.sub("***", text)
 
 WORDS = [
     "apple","cat","house","tree","car","dog","star","flower",
@@ -96,21 +107,21 @@ async def send_room_settings(room: RoomState, to: Optional[Client]=None):
     else:
         await broadcast(room, payload)
 
-async def assign_admin_if_needed(room: RoomState):
-    # ensure exactly one admin: first client in the list gets admin if none
+async def ensure_at_least_one_admin(room: RoomState):
     if room.clients and not any(c.is_admin for c in room.clients):
         room.clients[0].is_admin = True
-    # if multiple admins existed, keep only the first
-    seen = False
-    for c in room.clients:
-        if c.is_admin and not seen:
-            seen = True
-        else:
-            c.is_admin = False
 
-async def rotate_and_start_round(room: RoomState):
+def unique_name(room: RoomState, desired: str) -> str:
+    if not any(c.name == desired for c in room.clients):
+        return desired
+    base = desired
+    n = 2
+    while any(c.name == f"{base} ({n})" for c in room.clients):
+        n += 1
+    return f"{base} ({n})"
+
+async def start_round(room: RoomState):
     if len(room.clients) < 2:
-        # make sure clients (incl. first joiner) see who the admin is
         await send_players(room)
         for c in room.clients:
             await safe_send(c.ws, {"type":"waiting"})
@@ -132,9 +143,8 @@ async def rotate_and_start_round(room: RoomState):
     if room.mode == "random":
         room.current_word = choose_word()
         await safe_send(drawer.ws, {"type":"secret_word","word":room.current_word})
-    else:
+    else:  # choice
         options = choose_options(3)
-        # tell drawer to choose, and block drawing until chosen
         await safe_send(drawer.ws, {"type":"word_options","options":options})
         await safe_send(drawer.ws, {"type":"system","text":"Choose a word from the options above before drawing."})
 
@@ -176,16 +186,17 @@ async def ws_endpoint(ws: WebSocket):
                     await safe_send(ws, {"type":"error","message":"Room is locked by admin"})
                     continue
 
+                name = unique_name(state, name)  # ensure no dup names in room
                 client_obj = Client(ws, name)
                 room_code = candidate_room
                 state.clients.append(client_obj)
-                await assign_admin_if_needed(state)
+                await ensure_at_least_one_admin(state)
+
                 await safe_send(ws, {"type":"joined","room":room_code,"you":name})
                 await send_room_settings(state, to=client_obj)
-                await send_players(state)  # <-- ensure admin buttons enable immediately
+                await send_players(state)
                 await broadcast(state, {"type":"system","text":f"{name} joined."})
-
-                await rotate_and_start_round(state)
+                await start_round(state)
                 continue
 
             # Must join first
@@ -196,7 +207,7 @@ async def ws_endpoint(ws: WebSocket):
             state = rooms[room_code]
             tick_and_rate_limit(client_obj)
 
-            # DRAW (drawer only; blocked in 'choice' until word chosen)
+            # DRAW (drawer only; supports color/size/eraser; blocked in 'choice' until word chosen)
             if msg_type == "draw":
                 if not client_obj.is_drawer:
                     continue
@@ -206,25 +217,35 @@ async def ws_endpoint(ws: WebSocket):
                 if client_obj.draw_count > DRAW_RATE_PER_SEC:
                     continue
                 x = data.get("x"); y = data.get("y"); drag = bool(data.get("drag"))
+                color = data.get("color", "#111")
+                size = data.get("size", 4)
+                erase = bool(data.get("erase", False))
                 if not (isinstance(x,(int,float)) and isinstance(y,(int,float))):
                     continue
-                await broadcast(state, {"type":"draw","x":x,"y":y,"drag":drag}, exclude=client_obj)
+                # clamp brush size
+                try:
+                    size = int(size)
+                except Exception:
+                    size = 4
+                size = max(1, min(size, 40))
+                await broadcast(state, {"type":"draw","x":x,"y":y,"drag":drag,"color":color,"size":size,"erase":erase}, exclude=client_obj)
 
             # CLEAR (drawer only)
             elif msg_type == "clear":
                 if client_obj.is_drawer:
                     await broadcast(state, {"type":"clear"})
 
-            # CHAT (everyone EXCEPT drawer — drawer chat blocked to prevent giving away answers)
+            # CHAT (only guessers can chat, drawer blocked)
             elif msg_type == "chat":
                 if client_obj.is_drawer:
                     await safe_send(ws, {"type":"system","text":"Drawer cannot chat during their turn."})
                     continue
                 text = str(data.get("text",""))[:200]
                 if text:
+                    text = censor(text)
                     await broadcast(state, {"type":"chat","from":client_obj.name,"text":text})
 
-            # GUESS (everyone EXCEPT drawer)
+            # GUESS (only guessers can guess; hide 'guesses:' label)
             elif msg_type == "guess":
                 if client_obj.is_drawer:
                     await safe_send(ws, {"type":"system","text":"Drawer cannot guess."})
@@ -235,7 +256,10 @@ async def ws_endpoint(ws: WebSocket):
                 guess_raw = str(data.get("text","")).strip()
                 if not guess_raw:
                     continue
-                await broadcast(state, {"type":"chat","from":client_obj.name,"text":f"guesses: {guess_raw}"})
+                guess_sanitized = censor(guess_raw)
+                # Show guess text in chat without "guesses:"
+                await broadcast(state, {"type":"chat","from":client_obj.name,"text":guess_sanitized})
+                # Check correctness on original (un-censored) guess
                 if state.current_word and guess_raw.lower() == state.current_word.lower():
                     await broadcast(state, {"type":"correct","player":client_obj.name,"word":state.current_word})
                     if len(state.clients) >= 2:
@@ -243,7 +267,7 @@ async def ws_endpoint(ws: WebSocket):
                         state.current_word = ""
                         if ROUND_CLEAR_ON_CORRECT:
                             await broadcast(state, {"type":"clear"})
-                        await rotate_and_start_round(state)
+                        await start_round(state)
                 else:
                     await safe_send(ws, {"type":"feedback","result":"incorrect"})
 
@@ -256,7 +280,7 @@ async def ws_endpoint(ws: WebSocket):
                     state.current_word = word
                     await safe_send(client_obj.ws, {"type":"secret_word","word":state.current_word})
 
-            # ADMIN COMMANDS (auto-admin = first joiner)
+            # ADMIN COMMANDS (first joiner is admin; can add/remove admins)
             elif msg_type == "admin":
                 if not client_obj.is_admin:
                     await safe_send(ws, {"type":"error","message":"Admin only"})
@@ -275,16 +299,27 @@ async def ws_endpoint(ws: WebSocket):
                         await send_room_settings(state)
                         state.current_word = ""
                         await broadcast(state, {"type":"clear"})
-                        await rotate_and_start_round(state)
+                        await start_round(state)
                 elif action == "kick":
                     target_name = str(data.get("name","")).strip()
                     target = next((c for c in state.clients if c.name == target_name), None)
                     if target:
                         await safe_send(target.ws, {"type":"system","text":"You were kicked by admin."})
-                        try:
-                            await target.ws.close()
-                        except Exception:
-                            pass
+                        try: await target.ws.close()
+                        except Exception: pass
+                elif action == "make_admin":
+                    target_name = str(data.get("name","")).strip()
+                    target = next((c for c in state.clients if c.name == target_name), None)
+                    if target:
+                        target.is_admin = True
+                        await send_players(state)
+                elif action == "revoke_admin":
+                    target_name = str(data.get("name","")).strip()
+                    target = next((c for c in state.clients if c.name == target_name), None)
+                    if target:
+                        target.is_admin = False
+                        await ensure_at_least_one_admin(state)  # keep at least one admin
+                        await send_players(state)
 
     except WebSocketDisconnect:
         pass
@@ -297,7 +332,7 @@ async def ws_endpoint(ws: WebSocket):
                 was_drawer = client_obj.is_drawer
                 state.clients.remove(client_obj)
 
-                await assign_admin_if_needed(state)  # keep first as admin
+                await ensure_at_least_one_admin(state)
 
                 if state.clients:
                     if idx < state.drawer_index or state.drawer_index >= len(state.clients):
@@ -306,7 +341,7 @@ async def ws_endpoint(ws: WebSocket):
                         state.drawer_index = state.drawer_index % len(state.clients)
                         state.current_word = ""
                         await broadcast(state, {"type":"clear"})
-                        await rotate_and_start_round(state)
+                        await start_round(state)
                     await broadcast(state, {"type":"system","text":f"{name} left."})
                     await send_players(state)
                 else:
